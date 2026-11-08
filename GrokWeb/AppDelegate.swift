@@ -17,6 +17,87 @@ final class GrokViewController: UIViewController, WKNavigationDelegate, WKUIDele
     private var webView: WKWebView!
     private let homeURL = URL(string: "https://grok.com")!
 
+    // Native controls remain accessible even if the site's preview covers the page.
+    private lazy var toolsButton: UIButton = {
+        let b = UIButton(type: .system)
+        b.setTitle("预览 ⋯", for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        b.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.94)
+        b.layer.cornerRadius = 16
+        b.layer.borderWidth = 0.5
+        b.layer.borderColor = UIColor.separator.cgColor
+        b.addTarget(self, action: #selector(showPreviewMenu), for: .touchUpInside)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.accessibilityLabel = "预览操作"
+        return b
+    }()
+
+    @objc private func showPreviewMenu() {
+        let menu = UIAlertController(title: "Grok 预览操作", message: "不会删除对话或清除登录状态。", preferredStyle: .actionSheet)
+        menu.addAction(UIAlertAction(title: "尝试关闭网页预览", style: .default) { [weak self] _ in
+            self?.tryCloseWebPreview()
+        })
+        menu.addAction(UIAlertAction(title: "网页后退", style: .default) { [weak self] _ in
+            guard let self = self else { return }
+            if self.webView.canGoBack { self.webView.goBack() }
+            else { self.showMessage("当前没有可后退的网页历史。") }
+        })
+        menu.addAction(UIAlertAction(title: "重新加载网页", style: .default) { [weak self] _ in
+            self?.webView.reload()
+        })
+        menu.addAction(UIAlertAction(title: "取消", style: .cancel))
+        if let pop = menu.popoverPresentationController {
+            pop.sourceView = toolsButton
+            pop.sourceRect = toolsButton.bounds
+        }
+        present(menu, animated: true)
+    }
+
+    private func showMessage(_ text: String) {
+        let alert = UIAlertController(title: "GrokWeb", message: text, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default))
+        present(alert, animated: true)
+    }
+
+    private func tryCloseWebPreview() {
+        // Only attempt a close button inside a visible dialog/preview overlay.
+        // Never remove nodes or spoof a click on an unlabeled site control.
+        let script = #"""
+        (function () {
+          const roots = Array.from(document.querySelectorAll(
+            '[role="dialog"], [aria-modal="true"], [data-state="open"], [class*="preview" i], [class*="modal" i]'
+          ));
+          function visible(el) {
+            if (!el || !el.isConnected) return false;
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+          }
+          const candidates = [];
+          for (const root of roots) {
+            if (!visible(root)) continue;
+            const rs = root.getBoundingClientRect();
+            if (rs.width < 160 || rs.height < 160) continue;
+            for (const b of root.querySelectorAll('button,[role="button"]')) {
+              if (!visible(b)) continue;
+              const label = [b.getAttribute('aria-label'), b.getAttribute('title'), b.textContent]
+                .filter(Boolean).join(' ').trim().toLowerCase();
+              if (/^(close|dismiss|关闭|关闭预览|退出预览|×|✕|✖)$/.test(label))
+                candidates.push(b);
+            }
+          }
+          if (candidates.length) { candidates[candidates.length - 1].click(); return 'closed'; }
+          return 'not-found';
+        })();
+        """#
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            guard let self = self else { return }
+            if error != nil || (result as? String) != "closed" {
+                self.showMessage("未找到可识别的网页预览关闭按钮。请尝试“网页后退”；如果也无效，可重新加载网页。")
+            }
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .white
@@ -173,6 +254,13 @@ final class GrokViewController: UIViewController, WKNavigationDelegate, WKUIDele
         webView.isOpaque = false
         webView.backgroundColor = .white
         view.addSubview(webView)
+        view.addSubview(toolsButton)
+        NSLayoutConstraint.activate([
+            toolsButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -10),
+            toolsButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            toolsButton.widthAnchor.constraint(equalToConstant: 76),
+            toolsButton.heightAnchor.constraint(equalToConstant: 32)
+        ])
 
         // Do NOT bind the WKWebView bottom edge to keyboardLayoutGuide.
         // WKWebView already adjusts its own scroll/visual viewport for the keyboard;
